@@ -1,0 +1,10 @@
+{
+  "host": "vtiger.kpartners.it",
+  "user": "fatture",
+  "protocol": "sftp",
+  "port": 22,
+  "remotePath": "./fattureapp",
+  "uploadOnSave": true,
+  "privateKeyPath": "C:\\.ssh\\id_rsa",
+  "passphrase": ""
+}

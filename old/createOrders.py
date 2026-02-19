@@ -1,0 +1,276 @@
+import os
+import json
+from dotenv import load_dotenv
+import fattureincloud_python_sdk
+from globalutils import log, load_all_fic_clients, end_of_month
+from fattureincloud_python_sdk.api import issued_documents_api
+from fattureincloud_python_sdk.models import (
+    Entity,
+    IssuedDocument,
+    IssuedDocumentType,
+    Currency,
+    Language,
+    IssuedDocumentItemsListItem,
+    CreateIssuedDocumentRequest,
+    GetNewIssuedDocumentTotalsRequest,
+    IssuedDocumentOptions,
+    IssuedDocumentPaymentsListItem,
+    VatType,   # <-- per impostare l'aliquota 22%
+)
+# aggiungi in alto tra gli import
+from fattureincloud_python_sdk.rest import ApiException
+from dbconn import getdbconn
+import time
+from datetime import datetime, timedelta, date
+
+
+configuration = fattureincloud_python_sdk.Configuration(
+    host="https://api-v2.fattureincloud.it"
+)
+configuration.access_token = os.getenv("ACCESS_TOKEN")
+company_id = int(os.getenv("COMPANY_ID"))   # ID azienda su FIC
+log_filename = f"orders-{datetime.now().strftime('%Y%m%d')}.log"
+
+
+def mese_corrente_su_vtiger():
+    mesi = [
+        "GENNAIO", "FEBBRAIO", "MARZO", "APRILE", "MAGGIO", "GIUGNO",
+        "LUGLIO", "AGOSTO", "SETTEMBRE", "OTTOBRE", "NOVEMBRE", "DICEMBRE"
+    ]
+    oggi = date.today()
+    numero_mese = oggi.month
+    return f"{numero_mese:02d}-{mesi[numero_mese - 1]}"
+
+def get_orders_of_the_month():
+    month = mese_corrente_su_vtiger()
+    connection = getdbconn()
+    cursor = connection.cursor(dictionary=True)
+
+    query = """
+    SELECT 
+    vacf.cf_878 AS vat_number,
+    vacf.cf_1963 AS default_payment_method,
+    so.salesorderid,
+    so.`subject`,
+    vs.service_no,
+    ipr.sequence_no,
+    vs.servicename,
+    ipr.`comment`,
+    ipr.quantity,
+    ipr.listprice,
+    COALESCE(ipr.discount_percent,0) AS discount,
+    ipr.quantity * ipr.listprice * (100 - COALESCE(ipr.discount_percent,0))/100 AS net_price
+    FROM 
+    vtiger_account va LEFT JOIN vtiger_accountscf vacf ON (va.accountid=vacf.accountid)
+    LEFT JOIN vtiger_crmentity vce ON (vce.crmid=va.accountid)
+    LEFT JOIN vtiger_salesorder so ON (so.accountid=va.accountid)
+    LEFT JOIN vtiger_crmentity vce2 ON (vce2.crmid=so.salesorderid)
+    LEFT JOIN vtiger_inventoryproductrel ipr ON (so.salesorderid=ipr.id)
+    LEFT JOIN vtiger_salesordercf socf ON (socf.salesorderid=so.salesorderid)
+    LEFT JOIN vtiger_service vs ON (vs.serviceid=ipr.productid)
+    WHERE
+    vce.deleted=0
+    AND vce2.deleted=0
+    AND vacf.cf_878 IS NOT NULL 
+    AND LENGTH(vacf.cf_878) = 11 
+    AND va.account_type IN ("Ag. princ.","Ag. princ. collegata","Sub-A","SUB-E")
+    and socf.cf_1252=%s AND socf.cf_1254='SI'
+    ORDER BY so.salesorderid ASC,vat_number ASC , ipr.sequence_no ASC
+    """
+    cursor.execute(query, (month,))
+    results = cursor.fetchall()
+    cursor.close()
+    connection.close()
+    return results
+        
+def get_orders_of_the_customer(vatid):
+    month = mese_corrente_su_vtiger()
+    connection = getdbconn()
+    cursor = connection.cursor(dictionary=True)
+
+    query = """
+    SELECT
+    vacf.cf_878 AS vat_number,
+    vacf.cf_1963 AS default_payment_method,
+    so.salesorderid,
+    so.`subject`,
+    vs.service_no,
+    ipr.sequence_no,
+    vs.servicename,
+    ipr.`comment`,
+    ipr.quantity,
+    ipr.listprice,
+    COALESCE(ipr.discount_percent,0) AS discount,
+    ipr.quantity * ipr.listprice * (100 - COALESCE(ipr.discount_percent,0))/100 AS net_price
+    FROM
+    vtiger_account va LEFT JOIN vtiger_accountscf vacf ON (va.accountid=vacf.accountid)
+    LEFT JOIN vtiger_crmentity vce ON (vce.crmid=va.accountid)
+    LEFT JOIN vtiger_salesorder so ON (so.accountid=va.accountid)
+    LEFT JOIN vtiger_crmentity vce2 ON (vce2.crmid=so.salesorderid)
+    LEFT JOIN vtiger_inventoryproductrel ipr ON (so.salesorderid=ipr.id)
+    LEFT JOIN vtiger_salesordercf socf ON (socf.salesorderid=so.salesorderid)
+    LEFT JOIN vtiger_service vs ON (vs.serviceid=ipr.productid)
+    WHERE
+    
+    vce.deleted=0
+    AND vce2.deleted=0
+    AND vacf.cf_878=%s
+    AND LENGTH(vacf.cf_878) = 11
+    AND va.account_type IN ("Ag. princ.","Ag. princ. collegata","Sub-A","SUB-E")
+    and socf.cf_1252=%s AND socf.cf_1254='SI'
+    ORDER BY so.salesorderid ASC,vat_number ASC , ipr.sequence_no ASC
+    """
+    cursor.execute(query, (vatid,month,))
+    results = cursor.fetchall()
+    cursor.close()
+    connection.close()
+    return results
+
+        
+def  get_payment_method_id(api_client,company_id,payment_method):
+    info_api = fattureincloud_python_sdk.InfoApi(api_client)
+    try:
+        pm_resp = info_api.list_payment_methods(company_id)
+    except Exception as e:
+        log(f"Il metodo list_payment_methods non funziona dettagli: {e}",log_filename,"error")
+
+    name_to_id = {m.name: m.id for m in pm_resp.data}
+    payment_method_id = name_to_id.get(payment_method)
+    
+    return payment_method_id 
+
+    
+# --- MAIN ---
+if __name__ == "__main__":
+    results = get_orders_of_the_month()
+    orders = []
+
+    if not results:
+        log("Nessun ordine trovato dal gestionale per il mese corrente.", log_filename, "warning")
+        raise SystemExit(0)
+   
+    with fattureincloud_python_sdk.ApiClient(configuration) as api_client:
+        clients_api = fattureincloud_python_sdk.ClientsApi(api_client)
+        docs_api = issued_documents_api.IssuedDocumentsApi(api_client)
+
+        # cache clienti FIC
+        fic_clients = load_all_fic_clients(clients_api, log_filename, company_id)
+
+        # numerazione base: es. '2510' + '1' => primo numero del mese
+        progressivo = int(date.today().strftime("%m") + "001")
+        order_date=date.today().strftime("%Y-%m-%d")
+        due_eom = end_of_month(date.today()).strftime("%Y-%m-%d")
+        current_vat = None
+        order = None
+
+        
+        for row in results:
+            vat = row["vat_number"]
+            
+            # nuovo cliente => chiudo ordine precedente e apro il nuovo
+            if vat != current_vat:
+                if order:
+                    orders.append(order)
+                    order = None
+
+                current_vat = vat
+                progressivo += 1
+
+                # prendo id cliente FIC
+                existing = fic_clients.get(current_vat)
+                client_id = None
+                if isinstance(existing, dict):
+                    client_id = existing.get("id")
+                elif existing is not None:
+                    client_id = getattr(existing, "id", None)
+
+                if not client_id:
+                    log(f"Cliente P.IVA {current_vat} non presente su FIC: salto righe.", log_filename, "warning")
+                    order = None
+                    continue
+
+                #log(f"Cliente {current_vat} -> id={client_id}", log_filename, "notice")
+
+            if(order is None):
+                ent = Entity(
+                    id=client_id,
+                    name=existing.get("name"),
+                    address_street=existing.get("address_street"),
+                    address_postal_code=existing.get("address_zip"),
+                    address_city=existing.get("address_city"),
+                    address_province=existing.get("address_province"),
+                    certified_email=existing.get("certified_email"),
+                    email=existing.get("email"),
+                    tax_code=existing.get("tax_code"),
+                    vat_number=existing.get("vat_number"),
+                )
+                payment_method_id = get_payment_method_id(api_client,company_id,row["default_payment_method"])                
+                # creo nuovo ordine
+                order = IssuedDocument(
+                    payment_method=fattureincloud_python_sdk.PaymentMethod(id=payment_method_id),
+                    type=IssuedDocumentType("order"),
+                    entity=ent,
+                    date=order_date,
+                    due_date=due_eom,
+                    number=progressivo,
+                    currency=Currency(id="EUR"),
+                    language=Language(code="it", name="italiano"),
+                    items_list=[],
+                    show_payments=True,           # <— mostra le scadenze
+                    show_payment_method=True   
+                )
+                
+            # aggiungo SEMPRE la riga corrente (IVA 22% fissa)
+            if order:
+                order.items_list.append(
+                    IssuedDocumentItemsListItem(
+                        code=row["service_no"],
+                        name=row["servicename"],
+                        description=row["comment"],
+                        net_price=float(row["listprice"]),
+                        qty=float(row["quantity"]),
+                        discount=float(row["discount"]),
+                        vat=VatType(id=0)  # <<-- IVA fissa al 22%
+                    )
+                )
+
+        # push ultimo ordine
+        if order:
+            orders.append(order)
+
+        if not orders:
+            log("Nessun ordine costruito (tutti i clienti mancanti o nessuna riga valida).", log_filename, "warning")
+            raise SystemExit(0)
+
+        # --- INVIO TUTTI GLI ORDINI ---
+        ok = 0
+        ko = 0
+        
+        for idx, od in enumerate(orders, start=1):
+            try:
+                od.payments_list = [
+                    IssuedDocumentPaymentsListItem(
+                        amount=0.0,
+                        due_date=due_eom,
+                        status="not_paid"
+                    )
+                ]
+
+                resp = docs_api.create_issued_document(
+                    company_id,
+                    create_issued_document_request=CreateIssuedDocumentRequest(
+                        data=od,
+                        options=IssuedDocumentOptions(fix_payments=True)
+                    )
+                )
+                
+                ok += 1
+                log(f"[{idx}/{len(orders)}] Ordine creato: id={getattr(resp.data, 'id', None)} "
+                    f"numero={getattr(resp.data, 'number', None)}", log_filename, "notice")
+            except ApiException as e:
+                print("Errore creazione ordine:", e)
+                ko += 1
+                log(f"[{idx}/{len(orders)}] Errore creazione ordine: {e}", log_filename, "error")
+
+        print(f"Ordini inviati. OK={ok}  KO={ko}")
+        
