@@ -102,7 +102,19 @@ def  get_payment_method_id(api_client,company_id,payment_method):
 
 # --- MAIN ---
 if __name__ == "__main__":
-    results = get_orders_of_the_customer("00663890986")
+    vat_id_input = input("Inserisci VAT ID da usare per le righe: ").strip()
+
+    if not vat_id_input:
+        print("VAT ID non valido")
+        raise SystemExit(1)
+   
+    try:
+        progressivo = int(input("Inserisci numero progressivo iniziale: ").strip())
+    except ValueError:
+        print("Progressivo non valido")
+        raise SystemExit(1) 
+    
+    results = get_orders_of_the_customer(vat_id_input)
     current_month = date.today().strftime("%Y-%m")
     
     print("ATTENZIONE PER GLIORDINI ON DEMAND NON FACCIO CONTROLLI")
@@ -110,7 +122,7 @@ if __name__ == "__main__":
     orders = []
 
     if not results:
-        log("Nessun ordine trovato dal gestionale per il mese corrente per  00663890986 - TERMINO", log_filename, "warning")
+        log(f"Nessun ordine trovato dal gestionale per il mese corrente per {vat_id_input} - TERMINO", log_filename, "warning")
         raise SystemExit(0)
 
     with fattureincloud_python_sdk.ApiClient(configuration) as api_client:
@@ -121,7 +133,6 @@ if __name__ == "__main__":
         fic_clients = load_all_fic_clients(clients_api, log_filename, company_id)
 
         # numerazione e date documento
-        progressivo = 2275 #PARAMETRIZZARE
         order_date = date.today().strftime("%Y-%m-%d")
         due_eom = end_of_month(date.today()).strftime("%Y-%m-%d")
 

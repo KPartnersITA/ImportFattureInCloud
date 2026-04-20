@@ -19,7 +19,7 @@ configuration.access_token = os.getenv("ACCESS_TOKEN")
 company_id = int(os.getenv("COMPANY_ID"))
 
 BATCH_FILE = "clients_batch.json"
-BATCH_SIZE = 280
+BATCH_SIZE = 500
 
 PM_CACHE_FILE = "payment_methods_cache.json"
 
