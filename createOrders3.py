@@ -45,6 +45,7 @@ def get_orders_of_the_month():
     month = mese_corrente_su_vtiger()
     connection = getdbconn()
     cursor = connection.cursor(dictionary=True)
+    endoflastyear = date(date.today().year - 1, 12, 31).strftime("%Y-%m-%d")
 
     query = """
     SELECT 
@@ -76,10 +77,10 @@ def get_orders_of_the_month():
     AND LENGTH(vacf.cf_878) = 11 
     AND va.account_type IN ("Ag. princ.","Ag. princ. collegata","Sub-A","SUB-E")
     and socf.cf_1252=%s AND socf.cf_1254='SI'
-    AND vir.start_period<=NOW()
+    AND vir.start_period<=NOW()  and vir.end_period > %s 
     ORDER BY so.salesorderid ASC,vat_number ASC , ipr.sequence_no ASC
     """
-    cursor.execute(query, (month,))
+    cursor.execute(query, (month,endoflastyear))
     results = cursor.fetchall()
     cursor.close()
     connection.close()
@@ -89,6 +90,7 @@ def get_orders_of_the_customer(vatid):
     month = mese_corrente_su_vtiger()
     connection = getdbconn()
     cursor = connection.cursor(dictionary=True)
+    endoflastyear = date(date.today().year - 1, 12, 31).strftime("%Y-%m-%d")
 
     query = """
     SELECT
@@ -121,10 +123,10 @@ def get_orders_of_the_customer(vatid):
     AND LENGTH(vacf.cf_878) = 11
     AND va.account_type IN ("Ag. princ.","Ag. princ. collegata","Sub-A","SUB-E")
     and socf.cf_1252=%s AND socf.cf_1254='SI'
-    AND vir.start_period<=NOW()
+    AND vir.start_period<=NOW() and vir.end_period > %s 
     ORDER BY so.salesorderid ASC,vat_number ASC , ipr.sequence_no ASC
     """
-    cursor.execute(query, (vatid,month,))
+    cursor.execute(query, (vatid,month,endoflastyear))
     results = cursor.fetchall()
     cursor.close()
     connection.close()
